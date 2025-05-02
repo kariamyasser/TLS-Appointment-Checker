@@ -2,7 +2,7 @@ name: TLS Contact Appointment Checker
 
 on:
   schedule:
-    - cron: '*/15 * * * *'  # Runs every 30 minutes
+    - cron: '*/15 * * * *'  # Runs every 15 minutes
   workflow_dispatch:  # Allow manual triggering
 
 jobs:

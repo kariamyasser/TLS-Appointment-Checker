@@ -1,0 +1,218 @@
+name: TLS Contact Appointment Checker
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'  # Runs every 15 minutes
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  check-appointments:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          npm init -y
+          npm install puppeteer axios nodemailer
+
+      - name: Create appointment checker script
+        run: |
+          cat > check-appointments.js << 'EOL'
+          const puppeteer = require('puppeteer');
+          const axios = require('axios');
+          const nodemailer = require('nodemailer');
+
+          // Configuration (set these as GitHub secrets in your repository)
+          const EMAIL = process.env.EMAIL_USERNAME;
+          const EMAIL_PASSWORD = process.env.EMAIL_PASSWORD;
+          const NOTIFICATION_EMAIL = process.env.NOTIFICATION_EMAIL;
+          const TLS_EMAIL = process.env.TLS_EMAIL || 'admin';
+          const TLS_PASSWORD = process.env.TLS_PASSWORD || 'admin';
+
+          // API URLs to check
+          const API_URLS = [
+            'https://de.tlscontact.com/services/customerservice/api/tls/appointment/eg/egCAI2de/table?client=de&formGroupId=3073487&appointmentType=normal&appointmentStage=appointment',
+            'https://de.tlscontact.com/services/customerservice/api/tls/appointment/eg/egCAI2de/table?client=de&formGroupId=3073487&appointmentType=prime%20time&appointmentStage=appointment',
+            'https://de.tlscontact.com/services/customerservice/api/tls/appointment/eg/egCAI2de/table?client=de&formGroupId=3073487&appointmentType=prime%20time%20weekend&appointmentStage=appointment',
+            'https://de.tlscontact.com/services/customerservice/api/tls/appointment/eg/egCAI2de/table?client=de&formGroupId=3073487&appointmentType=premium&appointmentStage=appointment'
+          ];
+
+          // Create email transporter
+          const transporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: {
+              user: EMAIL,
+              pass: EMAIL_PASSWORD
+            }
+          });
+
+          // Function to send notification
+          async function sendNotification(message) {
+            console.log(`Sending notification: ${message}`);
+            
+            // Send email notification
+            try {
+              const mailOptions = {
+                from: EMAIL,
+                to: NOTIFICATION_EMAIL,
+                subject: 'TLS Contact Appointment Available!',
+                text: message,
+                html: `<p>${message}</p>`
+              };
+              
+              await transporter.sendMail(mailOptions);
+              console.log('Email notification sent successfully!');
+            } catch (error) {
+              console.error('Error sending email notification:', error);
+            }
+          }
+
+          // Function to check if the API response indicates available appointments
+          function hasAvailableAppointments(data) {
+            // Check if data contains appointment dates
+            // Return true if appointments are available
+            
+            // The response structure might vary, so we need to inspect it first
+            console.log('API Response:', JSON.stringify(data).substring(0, 500) + '...');
+            
+            // Typical checks might include:
+            if (!data) return false;
+            
+            // Check if there's a dates array with content
+            if (data.dates && data.dates.length > 0) return true;
+            
+            // Check if there are available slots
+            if (data.availableSlots && data.availableSlots.length > 0) return true;
+            
+            // Check for other success indicators
+            if (data.success === true && data.data && data.data.length > 0) return true;
+            
+            return false;
+          }
+
+          // Main function
+          async function checkAppointments() {
+            const browser = await puppeteer.launch({
+              headless: true,
+              args: ['--no-sandbox', '--disable-setuid-sandbox']
+            });
+            
+            try {
+              console.log('Starting appointment check...');
+              const page = await browser.newPage();
+              
+              // Go to the login page
+              await page.goto('https://de.tlscontact.com/appointment/eg/egCAI2de/3073487', { waitUntil: 'networkidle2' });
+              console.log('Page loaded');
+              
+              // Check if login form exists
+              const hasLoginForm = await page.evaluate(() => {
+                return document.querySelector('input[type="email"]') !== null || 
+                       document.querySelector('input[type="text"]') !== null;
+              });
+              
+              if (hasLoginForm) {
+                console.log('Login form detected, attempting to log in...');
+                
+                // Fill in login credentials
+                // Find email/username field - try different selectors
+                await page.evaluate((email) => {
+                  const emailField = document.querySelector('input[type="email"]') || 
+                                  document.querySelector('input[name="username"]') ||
+                                  document.querySelector('input[type="text"]');
+                  if (emailField) emailField.value = email;
+                }, TLS_EMAIL);
+                
+                // Find password field
+                await page.evaluate((password) => {
+                  const passwordField = document.querySelector('input[type="password"]');
+                  if (passwordField) passwordField.value = password;
+                }, TLS_PASSWORD);
+                
+                // Click login button - try different selectors
+                await page.evaluate(() => {
+                  const loginButton = document.querySelector('button[type="submit"]') || 
+                                    document.querySelector('input[type="submit"]') ||
+                                    Array.from(document.querySelectorAll('button')).find(b => b.textContent.toLowerCase().includes('log in') || b.textContent.toLowerCase().includes('login'));
+                  if (loginButton) loginButton.click();
+                });
+                
+                // Wait for navigation after login
+                await page.waitForNavigation({ waitUntil: 'networkidle2' }).catch(() => console.log('Navigation timeout - proceeding anyway'));
+                console.log('Logged in successfully');
+              } else {
+                console.log('No login form detected, proceeding with API checks');
+              }
+              
+              // Store cookies for API requests
+              const cookies = await page.cookies();
+              const cookieString = cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; ');
+              
+              // Check each API endpoint
+              let availableAppointmentsFound = false;
+              
+              for (const url of API_URLS) {
+                console.log(`Checking API: ${url}`);
+                try {
+                  const response = await axios.get(url, {
+                    headers: {
+                      'Cookie': cookieString,
+                      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                    }
+                  });
+                  
+                  if (response.status === 200) {
+                    console.log(`API responded with status 200`);
+                    const data = response.data;
+                    
+                    if (hasAvailableAppointments(data)) {
+                      console.log('Available appointments found!');
+                      const appointmentType = url.includes('normal') ? 'Normal' : 
+                                            url.includes('prime%20time%20weekend') ? 'Prime Time Weekend' :
+                                            url.includes('prime%20time') ? 'Prime Time' : 'Premium';
+                      
+                      const message = `Available appointments found for ${appointmentType} appointment type! Check the website: https://de.tlscontact.com/appointment/eg/egCAI2de/3073487`;
+                      await sendNotification(message);
+                      availableAppointmentsFound = true;
+                    } else {
+                      console.log('No available appointments found for this appointment type');
+                    }
+                  } else {
+                    console.log(`API responded with status ${response.status}`);
+                  }
+                } catch (error) {
+                  console.error(`Error checking API ${url}:`, error.message);
+                }
+              }
+              
+              if (!availableAppointmentsFound) {
+                console.log('No available appointments found in any category');
+              }
+              
+            } catch (error) {
+              console.error('Error during appointment check:', error);
+            } finally {
+              await browser.close();
+              console.log('Appointment check completed');
+            }
+          }
+
+          // Run the main function
+          checkAppointments().catch(console.error);
+          EOL
+
+      - name: Run appointment checker
+        env:
+          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
+          TLS_EMAIL: ${{ secrets.TLS_EMAIL }}
+          TLS_PASSWORD: ${{ secrets.TLS_PASSWORD }}
+        run: node check-appointments.js

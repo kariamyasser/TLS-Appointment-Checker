@@ -147,12 +147,32 @@ jobs:
               await page.goto('https://de.tlscontact.com/appointment/eg/egCAI2de/3073487', { waitUntil: 'networkidle2' });
               console.log('Page loaded');
               
-              // Add delay of 5 seconds before login form detection
-              console.log('Waiting 5 seconds before checking for login form...');
-              await new Promise(resolve => setTimeout(resolve, 5000));
-              console.log('Delay completed, checking for login form');
+              // Wait for login form to appear with timeout
+              console.log('Waiting for login form to appear...');
+              let loginFormFound = false;
+              let waitStartTime = Date.now();
+              const maxWaitTime = 30000; // 30 seconds maximum wait
               
-              // Check if login form exists
+              while (!loginFormFound && (Date.now() - waitStartTime) < maxWaitTime) {
+                loginFormFound = await page.evaluate(() => {
+                  return document.querySelector('input[type="email"]') !== null || 
+                         document.querySelector('input[type="text"]') !== null || 
+                         document.querySelector('input[type="password"]') !== null;
+                });
+                
+                if (!loginFormFound) {
+                  // Wait a short time before checking again
+                  await new Promise(resolve => setTimeout(resolve, 500));
+                }
+              }
+              
+              if (loginFormFound) {
+                console.log(`Login form detected after ${(Date.now() - waitStartTime)/1000} seconds`);
+                statusReport.loginStatus = 'Form detected';
+              } else {
+                console.log('Login form not found after waiting');
+                statusReport.loginStatus = 'No login form detected after waiting';
+              }
               const hasLoginForm = await page.evaluate(() => {
                 return document.querySelector('input[type="email"]') !== null || 
                        document.querySelector('input[type="text"]') !== null;
@@ -192,12 +212,21 @@ jobs:
                 });
                 console.log('Logged in successfully');
                 
-                // Add delay of 5 seconds after login
-                console.log('Waiting 5 seconds after login...');
-                await new Promise(resolve => setTimeout(resolve, 5000));
-                console.log('Post-login delay completed');
+                // Monitor network for appointment-related APIs for 1 minute
+                console.log('Monitoring network for appointment APIs for 1 minute...');
+                statusReport.loginStatus = 'Login successful, monitoring network';
                 
-                statusReport.loginStatus = 'Login attempt completed';
+                // Start the monitoring period
+                const monitorStartTime = Date.now();
+                const monitorDuration = 60000; // 1 minute
+                
+                // Keep the page open and collect network requests
+                await new Promise(resolve => setTimeout(resolve, monitorDuration));
+                
+                console.log(`Network monitoring completed after 1 minute`);
+                console.log(`Detected ${statusReport.capturedAppointmentAPIs.length} appointment-related APIs during monitoring`);
+                
+                statusReport.loginStatus = 'Login and network monitoring completed';
               } else {
                 console.log('No login form detected, proceeding with API checks');
                 statusReport.loginStatus = 'No login form detected';

@@ -8,7 +8,11 @@ This GitHub Action automatically checks the TLS Contact website for available vi
 2. It uses Puppeteer to access the TLS Contact website
 3. Logs in with your provided credentials (if needed)
 4. Checks multiple API endpoints for different appointment types
-5. Sends an email notification when appointments are available
+5. Sends detailed email reports after each run, including:
+   - Status of all API checks
+   - Discovery of any new appointment-related APIs
+   - Complete run status with timestamps
+   - Available appointment notifications (when found)
 
 ## Setup Instructions
 
@@ -46,7 +50,7 @@ To change how often the script runs, modify the cron schedule in `.github/workfl
 
 ```yaml
 schedule:
-  - cron: '*/30 * * * *'  # Runs every 30 minutes
+  - cron: '*/15 * * * *'  # Runs every 15 minutes
 ```
 
 For example, to run every hour, use `0 * * * *` instead.

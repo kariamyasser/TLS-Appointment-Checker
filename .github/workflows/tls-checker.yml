@@ -54,17 +54,26 @@ jobs:
           });
 
           // Function to send notification
-          async function sendNotification(message) {
+          async function sendNotification(message, isAvailable = true, customSubject = null) {
             console.log(`Sending notification: ${message}`);
             
             // Send email notification
             try {
+              let subject;
+              if (customSubject) {
+                subject = customSubject;
+              } else {
+                subject = isAvailable 
+                  ? 'TLS Contact Appointment Available!' 
+                  : 'TLS Contact Appointment Check Update';
+              }
+                
               const mailOptions = {
                 from: EMAIL,
                 to: NOTIFICATION_EMAIL,
-                subject: 'TLS Contact Appointment Available!',
+                subject: subject,
                 text: message,
-                html: `<p>${message}</p>`
+                html: `<p>${message.replace(/\n/g, '<br>')}</p>`
               };
               
               await transporter.sendMail(mailOptions);
@@ -104,9 +113,35 @@ jobs:
               args: ['--no-sandbox', '--disable-setuid-sandbox']
             });
             
+            let statusReport = {
+              startTime: new Date().toLocaleString(),
+              loginStatus: 'Not attempted',
+              apiChecks: [],
+              capturedAppointmentAPIs: [],
+              errors: [],
+              finalStatus: 'Not completed'
+            };
+            
             try {
               console.log('Starting appointment check...');
               const page = await browser.newPage();
+              
+              // Enable request interception to capture network requests
+              await page.setRequestInterception(true);
+              
+              // Listen for all network requests
+              page.on('request', request => {
+                const url = request.url();
+                // Look for any API calls that might be related to appointments
+                if (url.toLowerCase().includes('appointment') && url.includes('/api/')) {
+                  statusReport.capturedAppointmentAPIs.push({
+                    url: url,
+                    method: request.method()
+                  });
+                  console.log(`Captured potential appointment API: ${url}`);
+                }
+                request.continue();
+              });
               
               // Go to the login page
               await page.goto('https://de.tlscontact.com/appointment/eg/egCAI2de/3073487', { waitUntil: 'networkidle2' });
@@ -120,6 +155,7 @@ jobs:
               
               if (hasLoginForm) {
                 console.log('Login form detected, attempting to log in...');
+                statusReport.loginStatus = 'Form detected';
                 
                 // Fill in login credentials
                 // Find email/username field - try different selectors
@@ -145,10 +181,15 @@ jobs:
                 });
                 
                 // Wait for navigation after login
-                await page.waitForNavigation({ waitUntil: 'networkidle2' }).catch(() => console.log('Navigation timeout - proceeding anyway'));
+                await page.waitForNavigation({ waitUntil: 'networkidle2' }).catch(() => {
+                  console.log('Navigation timeout - proceeding anyway');
+                  statusReport.loginStatus = 'Navigation timeout after login attempt';
+                });
                 console.log('Logged in successfully');
+                statusReport.loginStatus = 'Login attempt completed';
               } else {
                 console.log('No login form detected, proceeding with API checks');
+                statusReport.loginStatus = 'No login form detected';
               }
               
               // Store cookies for API requests
@@ -160,6 +201,14 @@ jobs:
               
               for (const url of API_URLS) {
                 console.log(`Checking API: ${url}`);
+                const apiStatus = {
+                  url: url,
+                  status: 'Not checked',
+                  hasAppointments: false,
+                  response: null,
+                  error: null
+                };
+                
                 try {
                   const response = await axios.get(url, {
                     headers: {
@@ -168,39 +217,84 @@ jobs:
                     }
                   });
                   
+                  apiStatus.status = `${response.status}`;
+                  
                   if (response.status === 200) {
                     console.log(`API responded with status 200`);
                     const data = response.data;
+                    apiStatus.response = JSON.stringify(data).substring(0, 300) + '...';
                     
                     if (hasAvailableAppointments(data)) {
                       console.log('Available appointments found!');
+                      apiStatus.hasAppointments = true;
+                      
                       const appointmentType = url.includes('normal') ? 'Normal' : 
                                             url.includes('prime%20time%20weekend') ? 'Prime Time Weekend' :
                                             url.includes('prime%20time') ? 'Prime Time' : 'Premium';
                       
-                      const message = `Available appointments found for ${appointmentType} appointment type! Check the website: https://de.tlscontact.com/appointment/eg/egCAI2de/3073487`;
-                      await sendNotification(message);
+                      const message = `Available appointments found for ${appointmentType} appointment type! Check the website: https://de.tlscontact.com/appointment/eg/egCAI2de/3073487. Check performed at ${new Date().toLocaleString()}`;
+                      await sendNotification(message, true);
                       availableAppointmentsFound = true;
                     } else {
                       console.log('No available appointments found for this appointment type');
+                      apiStatus.hasAppointments = false;
                     }
                   } else {
                     console.log(`API responded with status ${response.status}`);
                   }
                 } catch (error) {
                   console.error(`Error checking API ${url}:`, error.message);
+                  apiStatus.status = 'Error';
+                  apiStatus.error = error.message;
                 }
+                
+                statusReport.apiChecks.push(apiStatus);
               }
               
               if (!availableAppointmentsFound) {
                 console.log('No available appointments found in any category');
+                const message = `No available appointments found in any category. Check performed at ${new Date().toLocaleString()}`;
+                await sendNotification(message, false);
               }
+              
+              statusReport.finalStatus = 'Completed';
               
             } catch (error) {
               console.error('Error during appointment check:', error);
+              statusReport.errors.push(error.message);
+              statusReport.finalStatus = 'Failed with error';
             } finally {
               await browser.close();
               console.log('Appointment check completed');
+              
+              // Send status report email
+              statusReport.endTime = new Date().toLocaleString();
+              const statusMessage = `
+                TLS Contact Appointment Check Status Report:
+                
+                Start Time: ${statusReport.startTime}
+                End Time: ${statusReport.endTime}
+                Login Status: ${statusReport.loginStatus}
+                Final Status: ${statusReport.finalStatus}
+                
+                API Checks:
+                ${statusReport.apiChecks.map(api => `
+                  - URL: ${api.url.substring(0, 50)}...
+                  - Status: ${api.status}
+                  - Appointments Available: ${api.hasAppointments}
+                  ${api.error ? `- Error: ${api.error}` : ''}
+                `).join('\n')}
+                
+                Additional Appointment APIs Detected:
+                ${statusReport.capturedAppointmentAPIs.length > 0 ? 
+                  statusReport.capturedAppointmentAPIs.map(api => `- ${api.method}: ${api.url}`).join('\n') : 
+                  'None detected'}
+                
+                Errors:
+                ${statusReport.errors.length > 0 ? statusReport.errors.join('\n') : 'None'}
+              `;
+              
+              await sendNotification(statusMessage, false, 'TLS Contact Appointment Check - Status Report');
             }
           }
 

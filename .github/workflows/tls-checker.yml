@@ -2,7 +2,7 @@ name: TLS Contact Appointment Checker
 
 on:
   schedule:
-    - cron: '*/15 * * * *'  # Runs every 15 minutes
+    - cron: '*/30 * * * *'  # Runs every 30 minutes
   workflow_dispatch:  # Allow manual triggering
 
 jobs:
@@ -147,6 +147,11 @@ jobs:
               await page.goto('https://de.tlscontact.com/appointment/eg/egCAI2de/3073487', { waitUntil: 'networkidle2' });
               console.log('Page loaded');
               
+              // Add delay of 5 seconds before login form detection
+              console.log('Waiting 5 seconds before checking for login form...');
+              await new Promise(resolve => setTimeout(resolve, 5000));
+              console.log('Delay completed, checking for login form');
+              
               // Check if login form exists
               const hasLoginForm = await page.evaluate(() => {
                 return document.querySelector('input[type="email"]') !== null || 
@@ -186,6 +191,12 @@ jobs:
                   statusReport.loginStatus = 'Navigation timeout after login attempt';
                 });
                 console.log('Logged in successfully');
+                
+                // Add delay of 5 seconds after login
+                console.log('Waiting 5 seconds after login...');
+                await new Promise(resolve => setTimeout(resolve, 5000));
+                console.log('Post-login delay completed');
+                
                 statusReport.loginStatus = 'Login attempt completed';
               } else {
                 console.log('No login form detected, proceeding with API checks');

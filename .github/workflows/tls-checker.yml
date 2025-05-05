@@ -1,4 +1,4 @@
-name: TLS Contact Appointment Checker
+name: TLSContact Appointment Checker
 
 on:
   schedule:
@@ -23,10 +23,17 @@ jobs:
         run: |
           npm install puppeteer nodemailer
           
+      - name: Install Puppeteer extras
+        run: npm install puppeteer-extra puppeteer-extra-plugin-stealth fs-extra
+      
       - name: Create appointment checker script
         run: |
           cat > appointment-checker.js << 'EOL'
-          const puppeteer = require('puppeteer');
+          const puppeteer = require('puppeteer-extra');
+          const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+          puppeteer.use(StealthPlugin());
+          const fs = require('fs-extra');
+          // No need to require puppeteer here as we're using puppeteer-extra
           const nodemailer = require('nodemailer');
 
           const API_URLS = [
@@ -102,27 +109,80 @@ jobs:
             };
 
             try {
-              // Launch browser with minimal anti-detection settings
-              log('Launching browser...');
+              // Try direct navigation to login page first to avoid potential redirection issues
+              const loginUrl = 'https://de.tlscontact.com/login/eg/egCAI2de';
+              
+              // Launch browser with enhanced anti-detection settings
+              log('Launching browser with stealth mode...');
               browser = await puppeteer.launch({ 
-                headless: true, // Always true in GitHub Actions
+                headless: 'new', // Use the new headless mode
                 args: [
                   '--no-sandbox', 
                   '--disable-setuid-sandbox',
                   '--disable-blink-features=AutomationControlled',
                   '--disable-gpu',
-                  '--disable-dev-shm-usage'
+                  '--disable-dev-shm-usage',
+                  '--window-size=1920,1080',
+                  '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                  '--disable-features=IsolateOrigins,site-per-process',
+                  '--disable-web-security',
+                  '--disable-features=site-per-process'
                 ]
               });
               
               const page = await browser.newPage();
               
-              // Basic anti-detection measures
+              // Enhanced anti-detection measures
               await page.evaluateOnNewDocument(() => {
                 // Override navigator.webdriver flag
                 Object.defineProperty(navigator, 'webdriver', {
                   get: () => false,
                 });
+
+                // Override Permissions API
+                if (navigator.permissions) {
+                  navigator.permissions.query = (parameters) => 
+                    Promise.resolve({ state: 'granted', addEventListener: () => {} });
+                }
+                
+                // Override plugins
+                Object.defineProperty(navigator, 'plugins', {
+                  get: () => [
+                    {
+                      0: {type: "application/pdf", suffixes: "pdf", description: "Portable Document Format"},
+                      name: "PDF Viewer", filename: "internal-pdf-viewer", description: "Portable Document Format"
+                    }
+                  ]
+                });
+                
+                // Override Chrome
+                window.chrome = {
+                  runtime: {}
+                };
+                
+                // Override permissions
+                window.Notification = { permission: 'granted' };
+                
+                // Override language
+                Object.defineProperty(navigator, 'language', {
+                  get: () => 'en-US',
+                });
+                
+                // Override platform
+                Object.defineProperty(navigator, 'platform', {
+                  get: () => 'Win32',
+                });
+                
+                // Override userAgent
+                Object.defineProperty(navigator, 'userAgent', {
+                  get: () => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+                });
+              });
+              
+              // Set default viewport to a common resolution
+              await page.setViewport({
+                width: 1920,
+                height: 1080
               });
               
               // Set up network request interception
@@ -180,48 +240,266 @@ jobs:
               // Add simple delay
               await delay(2000);
 
-              // Navigate to target URL
-              log(`Navigating to ${config.targetUrl}`);
-              await page.goto(config.targetUrl, { 
+              // Create directory for screenshots
+              const fs = require('fs').promises;
+              await fs.mkdir('./screenshots', { recursive: true }).catch(err => log(`Error creating screenshots directory: ${err.message}`));
+              
+              // Try navigating directly to login URL first
+              log(`First navigating to login page...`);
+              await page.goto('https://de.tlscontact.com/login/eg/egCAI2de', { 
                 waitUntil: 'networkidle2', 
-                timeout: 60000
+                timeout: 90000
+              }).catch(e => {
+                log(`Error navigating to login page: ${e.message}`);
               });
+              
+              // Take screenshot of login page
+              await page.screenshot({ path: './screenshots/login-page.png', fullPage: true });
+              
+              // Check if we're already on a login page
+              const isLoginPage = await page.evaluate(() => {
+                return document.querySelector('input[type="password"]') !== null;
+              });
+              
+              if (!isLoginPage) {
+                // Navigate to target URL if not on login page
+                log(`Navigating to appointment URL: ${config.targetUrl}`);
+                await page.goto(config.targetUrl, { 
+                  waitUntil: 'networkidle2', 
+                  timeout: 90000
+                });
+              }
+              
+              // Take screenshot of initial page
+              log('Taking screenshot of initial page...');
+              await page.screenshot({ path: './screenshots/initial-page.png', fullPage: true });
               
               // Wait for login form
               log('Waiting for login form to appear...');
               try {
-                // Wait for page to stabilize
-                await delay(3000);
+                // Wait for page to fully load and stabilize
+                await delay(5000);
                 
-                // Find and fill the email field
-                log('Filling email...');
-                await page.type('input[type="email"], input[name="email"], input[type="text"]', 
-                               config.tlsContact.email, { delay: 100 });
+                // Use network idle as an indicator
+                log('Waiting for network to become idle...');
+                await page.waitForNetworkIdle({ idleTime: 2000, timeout: 30000 }).catch(e => log(`Network idle timeout: ${e.message}`));
+                
+                // Take another screenshot after waiting
+                await page.screenshot({ path: './screenshots/before-login.png', fullPage: true });
+                
+                // Get page HTML for debugging
+                const pageContent = await page.content();
+                log(`Page title: ${await page.title()}`);
+                log(`Page content length: ${pageContent.length} characters`);
+                
+                // Log all input fields found for debugging
+                const inputFieldsInfo = await page.evaluate(() => {
+                  const inputs = Array.from(document.querySelectorAll('input'));
+                  return inputs.map(input => ({
+                    type: input.type,
+                    id: input.id,
+                    name: input.name,
+                    placeholder: input.placeholder,
+                    isVisible: input.offsetParent !== null
+                  }));
+                });
+                log(`Found ${inputFieldsInfo.length} input fields on page: ${JSON.stringify(inputFieldsInfo)}`);
+                
+                // Try to detect the login form using multiple strategies
+                log('Trying to detect login form elements...');
+                
+                // Try multiple selector strategies for the email field
+                log('Attempting to find and fill email field...');
+                let emailFieldFound = false;
+                const emailSelectors = [
+                  'input[type="email"]',
+                  'input[name="email"]',
+                  'input[id*="email" i]',
+                  'input[placeholder*="email" i]',
+                  'input.email',
+                  'input[type="text"]',
+                  'form input:first-of-type'
+                ];
+                
+                for (const selector of emailSelectors) {
+                  const emailExists = await page.$(selector);
+                  if (emailExists) {
+                    log(`Found email field with selector: ${selector}`);
+                    await page.type(selector, config.tlsContact.email, { delay: 150 });
+                    emailFieldFound = true;
+                    break;
+                  }
+                }
+                
+                if (!emailFieldFound) {
+                  log('WARNING: Could not find email field with standard selectors');
+                  // Try using JavaScript injection as a last resort
+                  await page.evaluate((email) => {
+                    const inputs = Array.from(document.querySelectorAll('input'));
+                    const emailInput = inputs.find(input => 
+                      input.type === 'email' || 
+                      input.name?.toLowerCase().includes('email') ||
+                      input.id?.toLowerCase().includes('email') ||
+                      input.placeholder?.toLowerCase().includes('email') ||
+                      input.type === 'text'
+                    );
+                    if (emailInput) {
+                      emailInput.value = email;
+                      emailInput.dispatchEvent(new Event('input', { bubbles: true }));
+                      emailInput.dispatchEvent(new Event('change', { bubbles: true }));
+                      return true;
+                    }
+                    return false;
+                  }, config.tlsContact.email).then(result => {
+                    if (result) log('Successfully injected email via JavaScript');
+                    else log('Failed to inject email via JavaScript');
+                  });
+                }
+                
+                // Take screenshot after email attempt
+                await page.screenshot({ path: './screenshots/after-email.png', fullPage: true });
                 
                 // Add delay between fields
-                await delay(1000);
+                await delay(1500);
                 
-                // Find and fill the password field
-                log('Filling password...');
-                await page.type('input[type="password"], input[name="password"]', 
-                               config.tlsContact.password, { delay: 100 });
+                // Try multiple selector strategies for the password field
+                log('Attempting to find and fill password field...');
+                let passwordFieldFound = false;
+                const passwordSelectors = [
+                  'input[type="password"]',
+                  'input[name="password"]',
+                  'input[id*="password" i]',
+                  'input[placeholder*="password" i]',
+                  'input.password',
+                  'form input[type="password"]',
+                  'form input:nth-of-type(2)'
+                ];
+                
+                for (const selector of passwordSelectors) {
+                  const passwordExists = await page.$(selector);
+                  if (passwordExists) {
+                    log(`Found password field with selector: ${selector}`);
+                    await page.type(selector, config.tlsContact.password, { delay: 150 });
+                    passwordFieldFound = true;
+                    break;
+                  }
+                }
+                
+                if (!passwordFieldFound) {
+                  log('WARNING: Could not find password field with standard selectors');
+                  // Try using JavaScript injection as a last resort
+                  await page.evaluate((password) => {
+                    const inputs = Array.from(document.querySelectorAll('input'));
+                    const passwordInput = inputs.find(input => 
+                      input.type === 'password' || 
+                      input.name?.toLowerCase().includes('password') ||
+                      input.id?.toLowerCase().includes('password')
+                    );
+                    if (passwordInput) {
+                      passwordInput.value = password;
+                      passwordInput.dispatchEvent(new Event('input', { bubbles: true }));
+                      passwordInput.dispatchEvent(new Event('change', { bubbles: true }));
+                      return true;
+                    }
+                    return false;
+                  }, config.tlsContact.password).then(result => {
+                    if (result) log('Successfully injected password via JavaScript');
+                    else log('Failed to inject password via JavaScript');
+                  });
+                }
+                
+                // Take screenshot after password attempt
+                await page.screenshot({ path: './screenshots/after-password.png', fullPage: true });
                 
                 // Delay before clicking submit
-                await delay(1000);
+                await delay(1500);
 
-                // Find and click login button
-                log('Submitting login information...');
-                await Promise.all([
-                  page.click('button[type="submit"]'),
-                  page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 60000 })
-                ]).catch(e => {
-                  log(`Navigation error (may be normal): ${e.message}`);
-                });
+                // Try multiple selector strategies for the submit button
+                log('Looking for submit button...');
+                const submitButtonSelectors = [
+                  'button[type="submit"]',
+                  'input[type="submit"]',
+                  'button:contains("Login")',
+                  'button:contains("Sign In")',
+                  'button:contains("Log In")',
+                  'button.login',
+                  'button.submit',
+                  'a.login-button',
+                  'form button'
+                ];
+                
+                let submitButtonFound = false;
+                for (const selector of submitButtonSelectors) {
+                  try {
+                    const buttonExists = await page.$(selector.replace(':contains(', '[text*=')); // Adjust contains syntax for puppeteer
+                    if (buttonExists) {
+                      log(`Found submit button with selector: ${selector}`);
+                      await Promise.all([
+                        page.click(selector.replace(':contains(', '[text*=')),
+                        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {})
+                      ]);
+                      submitButtonFound = true;
+                      break;
+                    }
+                  } catch (e) {
+                    log(`Error with selector ${selector}: ${e.message}`);
+                  }
+                }
+                
+                if (!submitButtonFound) {
+                  log('WARNING: Could not find submit button with standard selectors');
+                  // Try using JavaScript to submit the form
+                  await page.evaluate(() => {
+                    const form = document.querySelector('form');
+                    if (form) {
+                      form.submit();
+                      return true;
+                    }
+                    return false;
+                  }).then(result => {
+                    if (result) log('Successfully submitted form via JavaScript');
+                    else log('Failed to submit form via JavaScript');
+                  });
+                }
+                
+                // Take screenshot after submission attempt
+                await delay(3000);
+                await page.screenshot({ path: './screenshots/after-submit.png', fullPage: true });
                 
                 log('Login attempt completed, monitoring for appointment availability...');
                 
                 // Wait to capture API calls
                 await delay(20000);
+                
+                // Final page screenshot for verification
+                await page.screenshot({ path: './screenshots/final-page.png', fullPage: true });
+                
+                // Verify if we're actually on the appointment page
+                const currentUrl = page.url();
+                log(`Current URL after login: ${currentUrl}`);
+                
+                // Check if we can see appointment content
+                const appointmentPageContent = await page.evaluate(() => {
+                  // Try to find elements that would indicate we're on the appointment page
+                  const appointmentIndicators = [
+                    document.querySelector('.calendar'),
+                    document.querySelector('.appointment'),
+                    document.querySelector('.time-slots'),
+                    document.querySelector('[data-appointment]'),
+                    document.querySelector('button.continue')
+                  ];
+                  
+                  // Check if any indicator elements were found
+                  const foundIndicator = appointmentIndicators.find(el => el !== null);
+                  return {
+                    foundAppointmentElements: !!foundIndicator,
+                    pageTitle: document.title,
+                    bodyText: document.body.innerText.substring(0, 200) // First 200 chars
+                  };
+                });
+                
+                log(`Appointment page check: ${JSON.stringify(appointmentPageContent)}`);
+                log(`Checking for appointment data in intercepted responses...`);
                 
                 // Check the results
                 if (appointmentFound) {
@@ -294,3 +572,11 @@ jobs:
           EMAIL_PASS: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECIPIENT: ${{ secrets.NOTIFICATION_EMAIL }}
         run: node appointment-checker.js
+        
+      - name: Upload screenshots (if any)
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: debug-screenshots
+          path: ./screenshots/
+          retention-days: 5

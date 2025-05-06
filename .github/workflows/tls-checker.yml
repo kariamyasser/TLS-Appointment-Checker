@@ -2,336 +2,349 @@ name: TLSContact Appointment Checker
 
 on:
   schedule:
-    # Run every 30 minutes
+    # Run every 30 minutes with some variability
     - cron: '*/30 * * * *'
-  workflow_dispatch:  # Allows manual triggering of the workflow
+  workflow_dispatch:
+    # Allow manual trigger
 
 jobs:
   check-appointments:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     
+    env:
+      CHECK_INTERVAL_MINUTES: 30
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-        
-      - name: Set up Node.js
+
+      - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
           node-version: '18'
-          
+
       - name: Install dependencies
         run: |
           npm install puppeteer nodemailer
-          
-      - name: Install Puppeteer extras
-        run: npm install puppeteer-extra puppeteer-extra-plugin-stealth fs-extra
-      
-      - name: Create appointment checker script
-        run: |
-          cat > appointment-checker.js << 'EOL'
-          const puppeteer = require('puppeteer-extra');
-          const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-          puppeteer.use(StealthPlugin());
-          const fs = require('fs-extra');
-          // No need to require puppeteer here as we're using puppeteer-extra
-          const nodemailer = require('nodemailer');
 
-          const API_URLS = [
+      - name: Calculate jittered delay
+        id: jitter
+        run: |
+          # Calculate jitter for the start (±20%)
+          BASE_DELAY=60 # 1 minute initial delay in seconds
+          JITTER_FACTOR=0.2
+          JITTER_AMOUNT=$(echo "$BASE_DELAY * $JITTER_FACTOR" | bc)
+          RANDOM_JITTER=$(shuf -i -${JITTER_AMOUNT}-${JITTER_AMOUNT} -n 1)
+          JITTERED_DELAY=$(echo "$BASE_DELAY + $RANDOM_JITTER" | bc)
+          echo "Starting with jittered delay of $JITTERED_DELAY seconds"
+          echo "delay=$JITTERED_DELAY" >> $GITHUB_OUTPUT
+
+      - name: Add delay before checking
+        run: sleep ${{ steps.jitter.outputs.delay }}
+
+      - name: Check for appointments
+        id: check
+        uses: actions/github-script@v6
+        env:
+          TLS_EMAIL: ${{ secrets.TLS_EMAIL }}
+          TLS_PASSWORD: ${{ secrets.TLS_PASSWORD }}
+          EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
+        with:
+          script: |
+            const puppeteer = require('puppeteer');
+            const nodemailer = require('nodemailer');
+            const fs = require('fs').promises;
+            
+            // Configuration
+            const API_URLS = [
               'https://de.tlscontact.com/services/customerservice/api/tls/appointment/eg/egCAI2de/table?client=de&formGroupId=3097184&appointmentType=normal&appointmentStage=appointment',
               'https://de.tlscontact.com/services/customerservice/api/tls/appointment/eg/egCAI2de/table?client=de&formGroupId=3097184&appointmentType=prime%20time&appointmentStage=appointment',
               'https://de.tlscontact.com/services/customerservice/api/tls/appointment/eg/egCAI2de/table?client=de&formGroupId=3097184&appointmentType=prime%20time%20weekend&appointmentStage=appointment',
               'https://de.tlscontact.com/services/customerservice/api/tls/appointment/eg/egCAI2de/table?client=de&formGroupId=3097184&appointmentType=premium&appointmentStage=appointment'
-          ];
-
-          // Configuration - Using environment variables set from GitHub secrets
-          const config = {
-            // TLSContact login credentials
-            tlsContact: {
-              email: process.env.TLS_EMAIL,
-              password: process.env.TLS_PASSWORD,
-            },
-            // Email configuration
-            email: {
-              service: 'gmail',
-              auth: {
-                user: process.env.EMAIL_USER,
-                pass: process.env.EMAIL_PASS
+            ];
+            
+            const config = {
+              // TLSContact login credentials
+              tlsContact: {
+                email: process.env.TLS_EMAIL,
+                password: process.env.TLS_PASSWORD,
               },
-              recipient: process.env.EMAIL_RECIPIENT
-            },
-            // URL to check
-            targetUrl: 'https://de.tlscontact.com/appointment/eg/egCAI2de/3097184',
-            // Check interval in milliseconds (not used in GitHub Actions)
-            checkInterval: 30 * 60 * 1000
-          };
-
-          // Email sender setup
-          const transporter = nodemailer.createTransport({
-            service: config.email.service,
-            auth: config.email.auth
-          });
-
-          // Function to send email notifications
-          async function sendEmail(subject, content) {
-            const mailOptions = {
-              from: config.email.auth.user,
-              to: config.email.recipient,
-              subject: subject,
-              html: content
+              // Email configuration
+              email: {
+                service: 'gmail',
+                auth: {
+                  user: process.env.EMAIL_USERNAME,
+                  pass: process.env.EMAIL_PASSWORD
+                },
+                recipient: process.env.NOTIFICATION_EMAIL
+              },
+              // URL to check
+              targetUrl: 'https://de.tlscontact.com/appointment/eg/egCAI2de/3097184'
             };
-
-            try {
-              const info = await transporter.sendMail(mailOptions);
-              console.log(`Email sent: ${info.messageId}`);
-              return true;
-            } catch (error) {
-              console.error('Error sending email:', error);
-              return false;
+            
+            // Simple delay function
+            function delay(ms) {
+              return new Promise(resolve => setTimeout(resolve, ms));
             }
-          }
-
-          // Simple delay function
-          function delay(ms) {
-            return new Promise(resolve => setTimeout(resolve, ms));
-          }
-
-          function getRandomDelay(min, max) {
-            return Math.floor(Math.random() * (max - min + 1)) + min;
-          }
-
-          // Function to add variability to check interval
-          function getJitteredInterval() {
-            const jitterFactor = 0.2; // 20% variability
-            const jitterAmount = config.checkInterval * jitterFactor;
-            return config.checkInterval + getRandomDelay(-jitterAmount, jitterAmount);
-          }
-
-          // Main function to check for appointments
-          async function checkAppointments() {
+            
+            // Email sender setup
+            const transporter = nodemailer.createTransport({
+              service: config.email.service,
+              auth: config.email.auth
+            });
+            
+            // Function to send email notifications
+            async function sendEmail(subject, content) {
+              const mailOptions = {
+                from: config.email.auth.user,
+                to: config.email.recipient,
+                subject: subject,
+                html: content
+              };
+            
+              try {
+                const info = await transporter.sendMail(mailOptions);
+                console.log(`Email sent: ${info.messageId}`);
+                return true;
+              } catch (error) {
+                console.error('Error sending email:', error);
+                return false;
+              }
+            }
+            
+            // Main function to check for appointments
+            async function checkAppointments() {
               console.log(`Starting appointment check at ${new Date().toLocaleString()}`);
               let browser;
               let logMessages = [];
-
+              const screenshotsDir = './screenshots';
+              
+              // Create screenshots directory if it doesn't exist
+              try {
+                await fs.mkdir(screenshotsDir, { recursive: true });
+              } catch (err) {
+                console.error(`Error creating screenshots directory: ${err.message}`);
+              }
+            
               // Log and track progress
               const log = (message) => {
-                  const timestampedMessage = `[${new Date().toLocaleTimeString()}] ${message}`;
-                  console.log(timestampedMessage);
-                  logMessages.push(timestampedMessage);
+                const timestampedMessage = `[${new Date().toLocaleTimeString()}] ${message}`;
+                console.log(timestampedMessage);
+                logMessages.push(timestampedMessage);
               };
-
+            
               try {
-                  // Launch browser with minimal anti-detection settings
-                  log('Launching browser...');
-                  browser = await puppeteer.launch({
-                      headless: false, // Set to true in production
-                      args: [
-                          '--no-sandbox',
-                          '--disable-setuid-sandbox',
-                          '--disable-blink-features=AutomationControlled'
-                      ]
+                // Launch browser with minimal anti-detection settings
+                log('Launching browser...');
+                browser = await puppeteer.launch({
+                  headless: true,
+                  args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-dev-shm-usage'
+                  ]
+                });
+            
+                const page = await browser.newPage();
+            
+                // Basic anti-detection measures
+                await page.evaluateOnNewDocument(() => {
+                  // Override navigator.webdriver flag
+                  Object.defineProperty(navigator, 'webdriver', {
+                    get: () => false,
                   });
-
-                  const page = await browser.newPage();
-
-                  // Basic anti-detection measures
-                  await page.evaluateOnNewDocument(() => {
-                      // Override navigator.webdriver flag
-                      Object.defineProperty(navigator, 'webdriver', {
-                          get: () => false,
-                      });
-                  });
-
-                  // Set up network request interception
-                  let appointmentFound = false;
-                  let requestLogs = [];
-
-                  await page.setRequestInterception(true);
-                  page.on('request', request => {
-                      request.continue();
-                  });
-
-                  page.on('response', async response => {
-                      const url = response.url();
-                      const status = response.status();
-
-                      try {
-                          // Check if URL is one of our API URLs
-                          if (API_URLS.some(apiUrl => url.includes(apiUrl))) {
-                              const responseDetail = {
-                                  url: url,
-                                  status: status,
-                                  method: response.request().method()
-                              };
-
-                              requestLogs.push(responseDetail);
-                              log(`Intercepted API call: ${url} (Status: ${status})`);
-
-                              // Check for successful appointment response
-                              if (status === 200) {
-                                  try {
-                                      // Try to get response body only for certain content types
-                                      const contentType = response.headers()['content-type'] || '';
-                                      if (contentType.includes('application/json') || contentType.includes('text')) {
-                                          const responseBody = await response.text();
-                                          log(`Response body for ${url}: ${responseBody.substring(0, 100)}...`);
-
-                                          // Check if response contains available dates
-                                          if (responseBody &&
-                                              (responseBody.includes('"available":true') ||
-                                                  responseBody.includes('"available": true'))) {
-                                              appointmentFound = true;
-                                              log('FOUND AVAILABLE APPOINTMENT SLOT!');
-                                          }
-                                      }
-                                  } catch (bodyError) {
-                                      log(`Could not read response body: ${bodyError.message}`);
-                                  }
-                              }
-                          }
-                      } catch (responseError) {
-                          log(`Error processing response: ${responseError.message}`);
-                      }
-                  });
-
-                  // Add simple delay
-                  await delay(2000);
-
-
-                  // Create directory for screenshots
-                  const fs = require('fs').promises;
-                  await fs.mkdir('./screenshots', { recursive: true }).catch(err => log(`Error creating screenshots directory: ${err.message}`));
-
-
-                  // Navigate to target URL
-                  log(`Navigating to ${config.targetUrl}`);
-                  await page.goto(config.targetUrl, {
-                      waitUntil: 'networkidle2',
-                      timeout: 60000
-                  });
-
-                  // Wait for login form
-                  log('Waiting for login form to appear...');
+                });
+            
+                // Set up network request interception
+                let appointmentFound = false;
+                let requestLogs = [];
+            
+                await page.setRequestInterception(true);
+                page.on('request', request => {
+                  request.continue();
+                });
+            
+                page.on('response', async response => {
+                  const url = response.url();
+                  const status = response.status();
+            
                   try {
-                      // Wait for page to stabilize
-                      await delay(10000);
-
-                      // Take screenshot of login page
-                      await page.screenshot({ path: './screenshots/login-page.png', fullPage: true });
-
-                      // Find and fill the email field
-                      log('Filling email...');
-                      await page.type('input[type="email"], input[name="email"], input[type="text"]',
-                          config.tlsContact.email, { delay: 100 });
-
-                      // Add delay between fields
-                      await delay(1000);
-
-                      // Find and fill the password field
-                      log('Filling password...');
-                      await page.type('input[type="password"], input[name="password"]',
-                          config.tlsContact.password, { delay: 100 });
-
-                      // Delay before clicking submit
-                      await delay(1000);
-
-                      // Take screenshot of initial page
-                      log('Taking screenshot of login credentials input...');
-                      await page.screenshot({ path: './screenshots/login-cred-input.png', fullPage: true });
-
-                      // Find and click login button
-                      log('Submitting login information...');
-                      await Promise.all([
-                          page.click('button[type="submit"]'),
-                          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 60000 })
-                      ]).catch(e => {
-                          log(`Navigation error (may be normal): ${e.message}`);
-                      });
-
-                      log('Login attempt completed, monitoring for appointment availability...');
-
-                      // Wait to capture API calls
-                      await delay(20000);
-
-                      // Take another screenshot after waiting
-                      await page.screenshot({ path: './screenshots/after-login.png', fullPage: true });
-
-
-                      // Check the results
-                      if (appointmentFound) {
-                          log('APPOINTMENT FOUND! Sending notification email...');
-                          await sendEmail(
-                              '🎉 TLSContact Appointment Available!',
-                              `<h2>Appointment slot found!</h2>
-                    <p>An appointment slot was detected on the TLSContact website at ${new Date().toLocaleString()}.</p>
-                    <p>Please visit <a href="${config.targetUrl}">${config.targetUrl}</a> to book your appointment.</p>
-                    <h3>API Response Details:</h3>
-                    <pre>${JSON.stringify(requestLogs, null, 2)}</pre>`
-                          );
-                      } else {
-                          log('No appointments available at this time');
-                          await sendEmail(
-                              'TLSContact Appointment Check - No Availability',
-                              `<h2>No appointments available</h2>
-                    <p>No appointment slots were found during the check at ${new Date().toLocaleString()}.</p>
-                    <p>The script will continue checking every ${config.checkInterval / 60000} minutes.</p>
+                    // Check if URL is one of our API URLs
+                    if (API_URLS.some(apiUrl => url.includes(apiUrl))) {
+                      const responseDetail = {
+                        url: url,
+                        status: status,
+                        method: response.request().method()
+                      };
+            
+                      requestLogs.push(responseDetail);
+                      log(`Intercepted API call: ${url} (Status: ${status})`);
+                      
+                      // Check for successful appointment response
+                      if (status === 200) {
+                        try {
+                          // Try to get response body only for certain content types
+                          const contentType = response.headers()['content-type'] || '';
+                          if (contentType.includes('application/json') || contentType.includes('text')) {
+                            const responseBody = await response.text();
+                            log(`Response body for ${url}: ${responseBody.substring(0, 100)}...`);
+                            
+                            // Check if response contains available dates
+                            if (responseBody && 
+                                (responseBody.includes('"available":true') || 
+                                 responseBody.includes('"available": true'))) {
+                              appointmentFound = true;
+                              log('FOUND AVAILABLE APPOINTMENT SLOT!');
+                            }
+                          }
+                        } catch (bodyError) {
+                          log(`Could not read response body: ${bodyError.message}`);
+                        }
+                      }
+                    }
+                  } catch (responseError) {
+                    log(`Error processing response: ${responseError.message}`);
+                  }
+                });
+            
+                // Add simple delay
+                await delay(2000);
+            
+                // Navigate to target URL
+                log(`Navigating to ${config.targetUrl}`);
+                await page.goto(config.targetUrl, {
+                  waitUntil: 'networkidle2',
+                  timeout: 60000
+                });
+            
+                // Take screenshot of initial page
+                await page.screenshot({ path: `${screenshotsDir}/initial-page.png`, fullPage: true });
+            
+                // Wait for login form
+                log('Waiting for login form to appear...');
+                try {
+                  // Wait for page to stabilize
+                  await delay(3000);
+            
+                  // Find and fill the email field
+                  log('Filling email...');
+                  await page.type('input[type="email"], input[name="email"], input[type="text"]',
+                  config.tlsContact.email, { delay: 100 });
+            
+                  // Take screenshot after entering email
+                  await page.screenshot({ path: `${screenshotsDir}/after-email.png` });
+            
+                  // Add delay between fields
+                  await delay(1000);
+            
+                  // Find and fill the password field
+                  log('Filling password...');
+                  await page.type('input[type="password"], input[name="password"]',
+                  config.tlsContact.password, { delay: 100 });
+            
+                  // Delay before clicking submit
+                  await delay(1000);
+            
+                  // Take screenshot before submit
+                  await page.screenshot({ path: `${screenshotsDir}/before-submit.png` });
+            
+                  // Find and click login button
+                  log('Submitting login information...');
+                  await Promise.all([
+                    page.click('button[type="submit"]'),
+                    page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 60000 })
+                  ]).catch(e => {
+                    log(`Navigation error (may be normal): ${e.message}`);
+                  });
+            
+                  // Take screenshot after login attempt
+                  await page.screenshot({ path: `${screenshotsDir}/after-login.png`, fullPage: true });
+            
+                  log('Login attempt completed, monitoring for appointment availability...');
+            
+                  // Wait to capture API calls
+                  await delay(20000);
+            
+                  // Take final screenshot
+                  await page.screenshot({ path: `${screenshotsDir}/final-state.png`, fullPage: true });
+            
+                  // Check the results
+                  if (appointmentFound) {
+                    log('APPOINTMENT FOUND! Sending notification email...');
+                    await sendEmail(
+                      '🎉 TLSContact Appointment Available!',
+                      `<h2>Appointment slot found!</h2>
+                      <p>An appointment slot was detected on the TLSContact website at ${new Date().toLocaleString()}.</p>
+                      <p>Please visit <a href="${config.targetUrl}">${config.targetUrl}</a> to book your appointment.</p>
+                      <h3>API Response Details:</h3>
+                      <pre>${JSON.stringify(requestLogs, null, 2)}</pre>`
+                    );
+                  } else {
+                    log('No appointments available at this time');
+                    await sendEmail(
+                      'TLSContact Appointment Check - No Availability',
+                      `<h2>No appointments available</h2>
+                      <p>No appointment slots were found during the check at ${new Date().toLocaleString()}.</p>
+                      <p>The GitHub Action will continue checking as scheduled.</p>
+                      <h3>Process Log:</h3>
+                      <pre>${logMessages.join('\n')}</pre>`
+                    );
+                  }
+                } catch (formError) {
+                  log(`Error on login form: ${formError.message}`);
+                  // Take error screenshot
+                  await page.screenshot({ path: `${screenshotsDir}/form-error.png`, fullPage: true });
+                  
+                  await sendEmail(
+                    'TLSContact Appointment Check - Error',
+                    `<h2>Error during appointment check</h2>
+                    <p>An error occurred while checking for appointments at ${new Date().toLocaleString()}:</p>
+                    <p><strong>${formError.message}</strong></p>
                     <h3>Process Log:</h3>
                     <pre>${logMessages.join('\n')}</pre>`
-                          );
-                      }
-                  } catch (formError) {
-                      log(`Error on login form: ${formError.message}`);
-                      await sendEmail(
-                          'TLSContact Appointment Check - Error',
-                          `<h2>Error during appointment check</h2>
-                  <p>An error occurred while checking for appointments at ${new Date().toLocaleString()}:</p>
-                  <p><strong>${formError.message}</strong></p>
+                  );
+                }
+            
+              } catch (error) {
+                log(`Critical error: ${error.message}`);
+                await sendEmail(
+                  'TLSContact Appointment Check - Critical Error',
+                  `<h2>Critical error during appointment check</h2>
+                  <p>A critical error occurred while checking for appointments at ${new Date().toLocaleString()}:</p>
+                  <p><strong>${error.message}</strong></p>
                   <h3>Process Log:</h3>
                   <pre>${logMessages.join('\n')}</pre>`
-                      );
-                  }
-              } catch (error) {
-                  log(`Critical error: ${error.message}`);
-                  await sendEmail(
-                      'TLSContact Appointment Check - Critical Error',
-                      `<h2>Critical error during appointment check</h2>
-                <p>A critical error occurred while checking for appointments at ${new Date().toLocaleString()}:</p>
-                <p><strong>${error.message}</strong></p>
-                <h3>Process Log:</h3>
-                <pre>${logMessages.join('\n')}</pre>`
-                  );
+                );
               } finally {
-                  // Small delay before closing browser
-                  await delay(2000);
-
-                  // Close browser
-                  if (browser) {
-                      log('Closing browser');
-                      await browser.close();
-                  }
-                  log('Appointment check completed');
+                // Small delay before closing browser
+                await delay(2000);
+            
+                // Close browser
+                if (browser) {
+                  log('Closing browser');
+                  await browser.close();
+                }
+                log('Appointment check completed');
               }
-          }
+            }
+            
+            // Run the main function
+            await checkAppointments();
 
-          // Execute single check
-          checkAppointments().catch(err => {
-            console.error('Error in check:', err);
-            process.exit(1);
-          });
-          EOL
-          
-      - name: Run appointment checker
-        env:
-          TLS_EMAIL: ${{ secrets.TLS_EMAIL }}
-          TLS_PASSWORD: ${{ secrets.TLS_PASSWORD }}
-          EMAIL_USER: ${{ secrets.EMAIL_USERNAME }}
-          EMAIL_PASS: ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_RECIPIENT: ${{ secrets.NOTIFICATION_EMAIL }}
-        run: node appointment-checker.js
-        
-      - name: Upload screenshots (if any)
+      - name: Upload screenshots as artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-screenshots
+          name: appointment-check-screenshots
           path: ./screenshots/
-          retention-days: 5
+          retention-days: 3
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -rf ./screenshots/
+          echo "Cleanup completed"

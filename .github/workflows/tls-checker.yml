@@ -2,7 +2,7 @@ name: TLSContact Appointment Checker
 
 on:
   schedule:
-    # Run every 30 minutes with some variability
+    # Run less frequently to avoid detection (every 3 hours)
     - cron: '*/30 * * * *'
   workflow_dispatch:
     # Allow manual trigger
@@ -19,6 +19,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      - name: Set up Proxy (TOR)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tor
+          sudo service tor start
+          echo "Waiting for Tor to establish connection..."
+          sleep 10
+          # Verify Tor is running
+          curl --socks5 localhost:9050 --socks5-hostname localhost:9050 -s https://check.torproject.org/ | grep -m 1 Congratulations
+
       - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
@@ -26,24 +36,22 @@ jobs:
 
       - name: Install dependencies
         run: |
-          npm install puppeteer nodemailer
+          npm install puppeteer nodemailer puppeteer-extra puppeteer-extra-plugin-stealth puppeteer-extra-plugin-anonymize-ua
 
-      - name: Calculate jittered delay
-        id: jitter
-        run: |    
-          # Calculate jitter for the start (±20%)
-          BASE_DELAY=60 # 1 minute initial delay in seconds
-          JITTER_FACTOR=0.2
-          MAX_JITTER=$(echo "$BASE_DELAY * $JITTER_FACTOR" | bc | xargs printf "%.0f")
-          # Generate a random number between 0 and MAX_JITTER*2, then subtract MAX_JITTER to get range from -MAX to +MAX
-          RANDOM_JITTER=$(shuf -i 0-$((MAX_JITTER * 2)) -n 1)
-          RANDOM_JITTER=$((RANDOM_JITTER - MAX_JITTER))
-          JITTERED_DELAY=$(echo "$BASE_DELAY + $RANDOM_JITTER" | bc)
-          echo "Starting with jittered delay of $JITTERED_DELAY seconds"
-          echo "delay=$JITTERED_DELAY" >> $GITHUB_OUTPUT
-      - name: Add delay before checking
-        run: sleep ${{ steps.jitter.outputs.delay }}
+      - name: Calculate randomized delays
+        id: delays
+        run: |
+          # Calculate a more significant random delay before starting (1-20 minutes)
+          INITIAL_DELAY=$((RANDOM % 1200 + 60))
+          echo "Starting with a randomized delay of $INITIAL_DELAY seconds"
+          echo "initial_delay=$INITIAL_DELAY" >> $GITHUB_OUTPUT
+          
+          # Generate random user agent number
+          UA_NUM=$((RANDOM % 10 + 1))
+          echo "user_agent_num=$UA_NUM" >> $GITHUB_OUTPUT
 
+      - name: Add randomized delay before checking
+        run: sleep ${{ steps.delays.outputs.initial_delay }}
       - name: Check for appointments
         id: check
         uses: actions/github-script@v6
@@ -53,14 +61,23 @@ jobs:
           EMAIL_USERNAME: ${{ secrets.EMAIL_USERNAME }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
+          USER_AGENT: ${{ steps.user_profile.outputs.user_agent }}
+          SCREEN_WIDTH: ${{ steps.user_profile.outputs.width }}
+          SCREEN_HEIGHT: ${{ steps.user_profile.outputs.height }}
+          LANGUAGE: ${{ steps.user_profile.outputs.language }}
         with:
           script: |
-            const puppeteer = require('puppeteer');
+            
+            const puppeteer = require('puppeteer-extra');
+            const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+            const AnonymizeUAPlugin = require('puppeteer-extra-plugin-anonymize-ua');
+            
+            // Apply plugins
+            puppeteer.use(StealthPlugin());
+            puppeteer.use(AnonymizeUAPlugin({ customFn: () => process.env.USER_AGENT }));
+            
             const nodemailer = require('nodemailer');
             const fs = require('fs').promises;
-            
-            // Configuration
-            const API_URLS = [
               'https://de.tlscontact.com/services/customerservice/api/tls/appointment/eg/egCAI2de/table?client=de&formGroupId=3097184&appointmentType=normal&appointmentStage=appointment',
               'https://de.tlscontact.com/services/customerservice/api/tls/appointment/eg/egCAI2de/table?client=de&formGroupId=3097184&appointmentType=prime%20time&appointmentStage=appointment',
               'https://de.tlscontact.com/services/customerservice/api/tls/appointment/eg/egCAI2de/table?client=de&formGroupId=3097184&appointmentType=prime%20time%20weekend&appointmentStage=appointment',
@@ -138,27 +155,107 @@ jobs:
               };
             
               try {
-                // Launch browser with minimal anti-detection settings
-                log('Launching browser...');
+            // Configuration
+            const API_URLS = [
+            
+                // Launch browser with enhanced anti-detection settings
+                log('Launching browser with enhanced stealth features...');
+                
+                // Use TOR proxy if available
+                const proxyArgs = [];
+                try {
+                  // Check if TOR is running
+                  await new Promise((resolve, reject) => {
+                    require('http').get({
+                      host: 'localhost',
+                      port: 9050,
+                      path: '/',
+                      timeout: 1000
+                    }, resolve).on('error', reject);
+                  });
+                  log('TOR is running, using as proxy');
+                  proxyArgs.push('--proxy-server=socks5://localhost:9050');
+                } catch (e) {
+                  log('TOR is not running, proceeding without proxy');
+                }
+                
                 browser = await puppeteer.launch({
                   headless: true,
                   args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-dev-shm-usage'
+                    '--disable-dev-shm-usage',
+                    `--window-size=${process.env.SCREEN_WIDTH},${process.env.SCREEN_HEIGHT}`,
+                    '--disable-features=IsolateOrigins,site-per-process',
+                    '--disable-accelerated-2d-canvas',
+                    '--disable-gpu',
+                    '--disable-notifications',
+                    '--disable-extensions',
+                    ...proxyArgs
                   ]
                 });
-            
+                
                 const page = await browser.newPage();
-            
-                // Basic anti-detection measures
-                await page.evaluateOnNewDocument(() => {
-                  // Override navigator.webdriver flag
-                  Object.defineProperty(navigator, 'webdriver', {
-                    get: () => false,
-                  });
+                
+                // Set viewport to appear more like a real browser
+                await page.setViewport({
+                  width: parseInt(process.env.SCREEN_WIDTH),
+                  height: parseInt(process.env.SCREEN_HEIGHT),
+                  deviceScaleFactor: 1,
                 });
+                
+                // Set language and other headers to appear more like a real browser
+                await page.setExtraHTTPHeaders({
+                  'Accept-Language': process.env.LANGUAGE,
+                  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                  'Accept-Encoding': 'gzip, deflate, br',
+                  'Connection': 'keep-alive',
+                  'Upgrade-Insecure-Requests': '1',
+                  'Sec-Fetch-Dest': 'document',
+                  'Sec-Fetch-Mode': 'navigate',
+                  'Sec-Fetch-Site': 'none',
+                  'Sec-Fetch-User': '?1'
+                });
+                
+                // Add random mouse movements
+                async function randomMouseMovements(page) {
+                  const width = 1920;
+                  const height = 1080;
+                  
+                  // Number of random movements
+                  const movesCount = Math.floor(Math.random() * 5) + 2;
+                  
+                  for (let i = 0; i < movesCount; i++) {
+                    const x = Math.floor(Math.random() * width);
+                    const y = Math.floor(Math.random() * height);
+                    
+                    await page.mouse.move(x, y);
+                    await delay(Math.random() * 1000 + 500);
+                  }
+                }
+                
+                // Add function for more human-like typing
+                async function humanLikeType(page, selector, text) {
+                  await page.focus(selector);
+                  
+                  for (const char of text) {
+                    // Random delay between keystrokes (50-150ms)
+                    const typeDelay = Math.floor(Math.random() * 100) + 50;
+                    await page.keyboard.type(char, { delay: typeDelay });
+                    
+                    // Occasionally pause like a human would
+                    if (Math.random() < 0.2) {
+                      await delay(Math.floor(Math.random() * 400) + 100);
+                    }
+                  }
+                }
+                
+                // Random delay between actions to appear more human-like
+                async function randomDelay() {
+                  const delayTime = Math.floor(Math.random() * 1000) + 1000;
+                  await delay(delayTime);
+                  return delayTime;
+                }
             
                 // Set up network request interception
                 let appointmentFound = false;
@@ -230,25 +327,47 @@ jobs:
                 try {
                   // Wait for page to stabilize
                   await delay(3000);
+                  
+                  // Perform some random mouse movements to appear more human
+                  await randomMouseMovements(page);
+                  
+                  // Add random delay
+                  await randomDelay();
             
-                  // Find and fill the email field
-                  log('Filling email...');
-                  await page.type('input[type="email"], input[name="email"], input[type="text"]',
-                  config.tlsContact.email, { delay: 100 });
+                  // Find and fill the email field using human-like typing
+                  log('Filling email with human-like typing...');
+                  await humanLikeType(page, 'input[type="email"], input[name="email"], input[type="text"]', config.tlsContact.email);
             
                   // Take screenshot after entering email
                   await page.screenshot({ path: `${screenshotsDir}/after-email.png` });
             
-                  // Add delay between fields
-                  await delay(1000);
+                  // Add variable delay between fields
+                  const fieldDelay = await randomDelay();
+                  log(`Waiting ${fieldDelay}ms between fields...`);
             
-                  // Find and fill the password field
-                  log('Filling password...');
-                  await page.type('input[type="password"], input[name="password"]',
-                  config.tlsContact.password, { delay: 100 });
+                  // Perform some random mouse movements again
+                  await randomMouseMovements(page);
             
-                  // Delay before clicking submit
-                  await delay(1000);
+                  // Find and fill the password field with human-like typing
+                  log('Filling password with human-like typing...');
+                  await humanLikeType(page, 'input[type="password"], input[name="password"]', config.tlsContact.password);
+            
+                  // Variable delay before clicking submit
+                  const preSubmitDelay = await randomDelay();
+                  log(`Waiting ${preSubmitDelay}ms before submitting...`);
+                  
+                  // Small random mouse movement to the submit button
+                  const submitButton = await page.$('button[type="submit"]');
+                  if (submitButton) {
+                    const boundingBox = await submitButton.boundingBox();
+                    if (boundingBox) {
+                      // Move to a random position on the button
+                      const x = boundingBox.x + boundingBox.width * Math.random();
+                      const y = boundingBox.y + boundingBox.height * Math.random();
+                      await page.mouse.move(x, y);
+                      await delay(Math.random() * 500 + 200);
+                    }
+                  }
             
                   // Take screenshot before submit
                   await page.screenshot({ path: `${screenshotsDir}/before-submit.png` });
@@ -342,7 +461,7 @@ jobs:
         with:
           name: appointment-check-screenshots
           path: ./screenshots/
-          retention-days: 3
+          retention-days: 2
 
       - name: Cleanup
         if: always()

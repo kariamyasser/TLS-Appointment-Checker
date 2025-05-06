@@ -575,7 +575,7 @@ jobs:
         
       - name: Upload screenshots (if any)
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: debug-screenshots
           path: ./screenshots/

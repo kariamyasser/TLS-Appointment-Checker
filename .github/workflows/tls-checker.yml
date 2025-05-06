@@ -2,7 +2,7 @@ name: TLSContact Appointment Checker
 
 on:
   schedule:
-    # Run less frequently to avoid detection (every 3 hours)
+    # Run every 30 minutes
     - cron: '*/30 * * * *'
   workflow_dispatch:
     # Allow manual trigger
@@ -18,16 +18,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-
-      - name: Set up Proxy (TOR)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tor
-          sudo service tor start
-          echo "Waiting for Tor to establish connection..."
-          sleep 10
-          # Verify Tor is running
-          curl --socks5 localhost:9050 --socks5-hostname localhost:9050 -s https://check.torproject.org/ | grep -m 1 Congratulations
 
       - name: Setup Node.js
         uses: actions/setup-node@v3
@@ -52,6 +42,7 @@ jobs:
 
       - name: Add randomized delay before checking
         run: sleep ${{ steps.delays.outputs.initial_delay }}
+        
       - name: Check for appointments
         id: check
         uses: actions/github-script@v6
@@ -78,6 +69,9 @@ jobs:
             
             const nodemailer = require('nodemailer');
             const fs = require('fs').promises;
+
+            // Configuration
+            const API_URLS = [
               'https://de.tlscontact.com/services/customerservice/api/tls/appointment/eg/egCAI2de/table?client=de&formGroupId=3097184&appointmentType=normal&appointmentStage=appointment',
               'https://de.tlscontact.com/services/customerservice/api/tls/appointment/eg/egCAI2de/table?client=de&formGroupId=3097184&appointmentType=prime%20time&appointmentStage=appointment',
               'https://de.tlscontact.com/services/customerservice/api/tls/appointment/eg/egCAI2de/table?client=de&formGroupId=3097184&appointmentType=prime%20time%20weekend&appointmentStage=appointment',
@@ -155,29 +149,8 @@ jobs:
               };
             
               try {
-            // Configuration
-            const API_URLS = [
-            
                 // Launch browser with enhanced anti-detection settings
                 log('Launching browser with enhanced stealth features...');
-                
-                // Use TOR proxy if available
-                const proxyArgs = [];
-                try {
-                  // Check if TOR is running
-                  await new Promise((resolve, reject) => {
-                    require('http').get({
-                      host: 'localhost',
-                      port: 9050,
-                      path: '/',
-                      timeout: 1000
-                    }, resolve).on('error', reject);
-                  });
-                  log('TOR is running, using as proxy');
-                  proxyArgs.push('--proxy-server=socks5://localhost:9050');
-                } catch (e) {
-                  log('TOR is not running, proceeding without proxy');
-                }
                 
                 browser = await puppeteer.launch({
                   headless: true,
@@ -190,8 +163,7 @@ jobs:
                     '--disable-accelerated-2d-canvas',
                     '--disable-gpu',
                     '--disable-notifications',
-                    '--disable-extensions',
-                    ...proxyArgs
+                    '--disable-extensions'
                   ]
                 });
                 

@@ -36,7 +36,7 @@ jobs:
           JITTER_FACTOR=0.2
           JITTER_AMOUNT=$(echo "$BASE_DELAY * $JITTER_FACTOR" | bc)
           JITTER_AMOUNT_INT=$(printf "%.0f" "$JITTER_AMOUNT")  # Round to nearest integer
-          RANDOM_JITTER=$(shuf -i -${JITTER_AMOUNT_INT}-${JITTER_AMOUNT_INT} -n 1)
+          RANDOM_JITTER=$(shuf -i -$JITTER_AMOUNT_INT..$JITTER_AMOUNT_INT -n 1)
           JITTERED_DELAY=$(echo "$BASE_DELAY + $RANDOM_JITTER" | bc)
           echo "Starting with jittered delay of $JITTERED_DELAY seconds"
           echo "delay=$JITTERED_DELAY" >> $GITHUB_OUTPUT

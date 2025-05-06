@@ -35,11 +35,11 @@ jobs:
           BASE_DELAY=60 # 1 minute initial delay in seconds
           JITTER_FACTOR=0.2
           JITTER_AMOUNT=$(echo "$BASE_DELAY * $JITTER_FACTOR" | bc)
-          RANDOM_JITTER=$(shuf -i -${JITTER_AMOUNT}-${JITTER_AMOUNT} -n 1)
+          JITTER_AMOUNT_INT=$(printf "%.0f" "$JITTER_AMOUNT")  # Round to nearest integer
+          RANDOM_JITTER=$(shuf -i -${JITTER_AMOUNT_INT}-${JITTER_AMOUNT_INT} -n 1)
           JITTERED_DELAY=$(echo "$BASE_DELAY + $RANDOM_JITTER" | bc)
           echo "Starting with jittered delay of $JITTERED_DELAY seconds"
           echo "delay=$JITTERED_DELAY" >> $GITHUB_OUTPUT
-
       - name: Add delay before checking
         run: sleep ${{ steps.jitter.outputs.delay }}
 

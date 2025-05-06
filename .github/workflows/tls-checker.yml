@@ -30,15 +30,17 @@ jobs:
 
       - name: Calculate jittered delay
         id: jitter
-        run: |
+        run: |    
           # Calculate jitter for the start (±20%)
           BASE_DELAY=60 # 1 minute initial delay in seconds
           JITTER_FACTOR=0.2
           MAX_JITTER=$(echo "$BASE_DELAY * $JITTER_FACTOR" | bc | xargs printf "%.0f")
-          RANDOM_JITTER=$(shuf -i -$MAX_JITTER-$MAX_JITTER -n 1)
+          # Generate a random number between 0 and MAX_JITTER*2, then subtract MAX_JITTER to get range from -MAX to +MAX
+          RANDOM_JITTER=$(shuf -i 0-$((MAX_JITTER * 2)) -n 1)
+          RANDOM_JITTER=$((RANDOM_JITTER - MAX_JITTER))
           JITTERED_DELAY=$(echo "$BASE_DELAY + $RANDOM_JITTER" | bc)
           echo "Starting with jittered delay of $JITTERED_DELAY seconds"
-          echo "delay=$JITTERED_DELAY" >> $GITHUB_OUTPUT          
+          echo "delay=$JITTERED_DELAY" >> $GITHUB_OUTPUT
       - name: Add delay before checking
         run: sleep ${{ steps.jitter.outputs.delay }}
 

@@ -27,21 +27,6 @@ jobs:
       - name: Install dependencies
         run: |
           npm install puppeteer nodemailer puppeteer-extra puppeteer-extra-plugin-stealth puppeteer-extra-plugin-anonymize-ua
-
-      - name: Calculate randomized delays
-        id: delays
-        run: |
-          # Calculate a more significant random delay before starting (1-20 minutes)
-          INITIAL_DELAY=$((RANDOM % 1200 + 60))
-          echo "Starting with a randomized delay of $INITIAL_DELAY seconds"
-          echo "initial_delay=$INITIAL_DELAY" >> $GITHUB_OUTPUT
-          
-          # Generate random user agent number
-          UA_NUM=$((RANDOM % 10 + 1))
-          echo "user_agent_num=$UA_NUM" >> $GITHUB_OUTPUT
-
-      - name: Add randomized delay before checking
-        run: sleep ${{ steps.delays.outputs.initial_delay }}
         
       - name: Check for appointments
         id: check
